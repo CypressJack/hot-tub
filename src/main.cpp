@@ -131,7 +131,6 @@ void setup()
 {
   Serial.begin(9600);
   sensors.begin();
-  hottub.setup();
 }
 
 void loop()
