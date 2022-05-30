@@ -6,134 +6,184 @@
 
 #define ONE_WIRE_BUS 5
 
+#define PUMP 4
+
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-class Timer
+bool heater = false;
+bool jets = false;
+bool jetsRequested = false;
+bool safe;
+int target = 102;
+int maxTemp = 109;
+int maxHeatingMinutes = 120;
+int dangerHeatingTime = 320;
+int maxJetsMinutes = 25;
+int schedulerInterval = 10;
+int deadband = 2;
+
+std::chrono::system_clock::time_point heatStartingTime;
+std::chrono::system_clock::time_point jetsStartingTime;
+std::chrono::system_clock::time_point lastSchedulerCheck;
+
+void checkCurrentTemp()
 {
-public:
-  bool timing = false;
-  std::chrono::steady_clock::time_point startingTime;
+  sensors.requestTemperatures();
+  float currentTemp = sensors.getTempFByIndex(0);
+  if (currentTemp > maxTemp)
+  {
+    safe = false;
+    heater = false;
+    jets = false;
+  }
+  if (currentTemp > (target + deadband) && heater == true)
+  {
+    heater = false;
+    Serial.println("Heater has now turned off");
+  }
+  Serial.print("Safety Status: ");
+  Serial.print(safe);
+  Serial.print("\n");
+  if ((currentTemp < (target - deadband) && heater != true) && safe == true)
+  {
+    heater = true;
+    heatStartingTime = std::chrono::system_clock::now();
+    Serial.println("Heater has now turned on");
+  }
+  Serial.print("Heater = ");
+  Serial.print(heater);
+  Serial.print("\n");
+  Serial.print("Current Temp = ");
+  Serial.print(currentTemp);
+  Serial.print("\n");
+}
 
-  bool isTiming()
-  {
-    if (this->timing == true)
-    {
-      return true;
-    }
-    else
-    {
-      return false;
-    }
-  }
-  void start()
-  {
-    if (this->timing == false)
-    {
-      this->startingTime = std::chrono::steady_clock::now();
-      this->timing = true;
-    }
-  }
-  void end()
-  {
-    if (this->timing == true)
-    {
-      this->startingTime = std::chrono::steady_clock::now();
-      this->timing = false;
-    }
-  }
-  auto elapsed()
-  {
-    if (this->timing == true)
-    {
-      auto now = std::chrono::steady_clock::now();
-      std::chrono::duration<double> elapsed_seconds = now - startingTime;
-      return elapsed_seconds.count();
-    }
-  }
-};
-
-class Controller
+void turnOnJets()
 {
-public:
-  bool heater = false;
-  bool jets = false;
-  int pump = 16;
-  int target = 100;
-  int maxTemp = 103;
-  int maxHeatingMinutes = 240;
-  int maxJetsMinutes = 25;
-  int deadband = 3;
-
-  Timer heatElapsed;
-  Timer jetsElapsed;
-
-  // Tempuratures
-  float currentTemp()
+  if (safe == true)
   {
-    return sensors.getTempF(0);
+    jetsStartingTime = std::chrono::system_clock::now();
+    jets = true;
+    Serial.println("Jets has now turned on");
   }
-  void setTarget(int setPoint)
-  {
-    this->target = setPoint;
-  }
+}
 
-  // Heater
-  void heatOn()
+void turnOffJets()
+{
+  jets = false;
+  jetsRequested = false;
+  Serial.println("Jets has now turned off");
+}
+
+// periodically check how long the heater has been running
+void checkJetsTime()
+{
+  if (jets == true)
   {
-    if (this->currentTemp() < this->maxTemp)
+    auto now = std::chrono::system_clock::now();
+    std::chrono::duration<double> elapsed = now - jetsStartingTime;
+    if ((elapsed.count() / 60) > maxJetsMinutes)
     {
-      this->heater = true;
-      this->heatElapsed.start();
+      jets = false;
+    }
+    Serial.print("Current elapsed jets time: ");
+    Serial.print(elapsed.count() / 60);
+    Serial.print(" Minutes");
+    Serial.print("\n");
+  }
+}
+
+void manageJetsRequests()
+{
+  if (jetsRequested == true && jets == false)
+  {
+    turnOnJets();
+  }
+  if (jetsRequested == false && jets == true)
+  {
+    turnOffJets();
+  }
+  Serial.print("Jets status: ");
+  Serial.print(jetsRequested);
+  Serial.print("\n");
+}
+
+// periodically check how long the heater has been running
+void checkHeatingTime()
+{
+  if (heater == true)
+  {
+    auto now = std::chrono::system_clock::now();
+    std::chrono::duration<double> elapsed = now - heatStartingTime;
+    Serial.print("Elapsed heating time: ");
+    Serial.print(elapsed.count());
+    Serial.print("\n");
+    if ((elapsed.count() / 60) > maxHeatingMinutes)
+    {
+      heater = false;
     }
   }
-  void heatOff()
-  {
-    this->heater = false;
-    this->heatElapsed.end();
-  }
+}
 
-  // Jets
-  void jetsOn()
-  {
-    this->jetsElapsed.start();
-    this->jets = true;
-  }
+// Prevent the heat from coming on if in runaway condition
+// void killSwitch()
+// {
+//   if (heater == true)
+//   {
+//     auto now = std::chrono::system_clock::now();
+//     std::chrono::duration<double> elapsed = now - heatStartingTime;
+//     if ((elapsed.count() / 60) > dangerHeatingTime)
+//     {
+//       safe = false;
+//       heater = false;
+//       jets = false;
+//     }
+//   }
+// }
 
-  void jetsOff()
-  {
-    this->jetsElapsed.end();
-    this->jets = false;
+void handlePinWrite() {
+  if (heater == true) {
+    digitalWrite(PUMP, LOW);
+    return;
   }
-  // Safety Shutdown
-  void safetyCheck()
-  {
-    if (this->currentTemp() > this->maxTemp)
-    {
-      this->jetsOff();
-      this->heatOff();
-    }
-    if (this->heatElapsed.elapsed() > this->maxHeatingMinutes)
-    {
-      this->jetsOff();
-      this->heatOff();
-    }
-    if (this->jetsElapsed.elapsed() > this->maxJetsMinutes)
-    {
-      this->jetsOff();
-    }
-  }
-};
+  digitalWrite(PUMP, HIGH);
+}
 
-Controller hottub;
+void scheduler()
+{
+  auto now = std::chrono::system_clock::now();
+  std::chrono::duration<double> elapsed = now - lastSchedulerCheck;
+  if ((elapsed.count()) > schedulerInterval)
+  {
+    Serial.print("\n");
+    Serial.print("\n");
+    Serial.print("\n");
+    Serial.print("\n");
+    Serial.print("\n");
+    Serial.println("-------------------");
+    manageJetsRequests();
+    checkCurrentTemp();
+    checkHeatingTime();
+    checkJetsTime();
+    // killSwitch();
+    handlePinWrite();
+    Serial.println("-------------------");
+    lastSchedulerCheck = std::chrono::system_clock::now();
+  }
+}
 
 void setup()
 {
-  Serial.begin(9600);
-  sensors.begin();
+  Serial.begin(115200);
+  lastSchedulerCheck = std::chrono::system_clock::now();
+  safe = true;
+  pinMode(PUMP, OUTPUT);
+  digitalWrite(PUMP, HIGH);
 }
 
 void loop()
 {
-  // put your main code here, to run repeatedly:
+  scheduler();
+  delay(1000);
 }
